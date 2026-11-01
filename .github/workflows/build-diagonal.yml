@@ -1,0 +1,128 @@
+name: Build DiagonalDpad Firmware
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: v0.7.12
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential
+
+      - name: Create custom board config
+        run: |
+          mkdir -p configs/DiagonalDpad
+          cat > configs/DiagonalDpad/BoardConfig.h << 'EOF'
+#ifndef PICO_BOARD_CONFIG_H_
+#define PICO_BOARD_CONFIG_H_
+#include "enums.pb.h"
+#include "class/hid/hid.h"
+#define BOARD_CONFIG_LABEL "DiagonalDpad"
+#define GPIO_PIN_16 GpioAction::GPIO_INPUT_DISABLED
+#define GPIO_PIN_17 GpioAction::GPIO_INPUT_DISABLED
+#define GPIO_PIN_18 GpioAction::GPIO_INPUT_DISABLED
+#define GPIO_PIN_19 GpioAction::GPIO_INPUT_DISABLED
+#define GPIO_PIN_08 GpioAction::BUTTON_PRESS_B1
+#define GPIO_PIN_07 GpioAction::BUTTON_PRESS_B2
+#define GPIO_PIN_06 GpioAction::BUTTON_PRESS_R2
+#define GPIO_PIN_05 GpioAction::BUTTON_PRESS_L2
+#define GPIO_PIN_12 GpioAction::BUTTON_PRESS_B3
+#define GPIO_PIN_11 GpioAction::BUTTON_PRESS_B4
+#define GPIO_PIN_10 GpioAction::BUTTON_PRESS_R1
+#define GPIO_PIN_09 GpioAction::BUTTON_PRESS_L1
+#define GPIO_PIN_15 GpioAction::BUTTON_PRESS_S1
+#define GPIO_PIN_13 GpioAction::BUTTON_PRESS_S2
+#define GPIO_PIN_21 GpioAction::BUTTON_PRESS_L3
+#define GPIO_PIN_22 GpioAction::BUTTON_PRESS_R3
+#define GPIO_PIN_14 GpioAction::BUTTON_PRESS_A1
+#define GPIO_PIN_20 GpioAction::BUTTON_PRESS_A2
+#endif
+EOF
+
+      - name: Create DiagonalDpad addon files
+        run: |
+          cat > src/add-ons/DiagonalDpad.h << 'EOF'
+#ifndef DIAGONAL_DPAD_H
+#define DIAGONAL_DPAD_H
+#include "addon.h"
+Addon* DiagonalDpadCreate();
+#endif
+EOF
+
+          cat > src/add-ons/DiagonalDpad.cpp << 'EOF'
+#include "DiagonalDpad.h"
+#include "pico/stdlib.h"
+#include "gamepad/GamepadState.h"
+#include "storage/Storage.h"
+#include "enums.pb.h"
+#define UL_PIN 0
+#define DL_PIN 1
+#define UR_PIN 2
+#define DR_PIN 3
+Addon* DiagonalDpadCreate()
+{
+    Addon* addon = new Addon();
+    addon->SetName("DiagonalDpad");
+    return addon;
+}
+static void DiagonalDpadInit(Addon* addon)
+{
+    gpio_init(UL_PIN); gpio_set_dir(UL_PIN, GPIO_IN); gpio_pull_up(UL_PIN);
+    gpio_init(DL_PIN); gpio_set_dir(DL_PIN, GPIO_IN); gpio_pull_up(DL_PIN);
+    gpio_init(UR_PIN); gpio_set_dir(UR_PIN, GPIO_IN); gpio_pull_up(UR_PIN);
+    gpio_init(DR_PIN); gpio_set_dir(DR_PIN, GPIO_IN); gpio_pull_up(DR_PIN);
+}
+static void DiagonalDpadProcess(Addon* addon)
+{
+    bool ul = !gpio_get(UL_PIN);
+    bool dl = !gpio_get(DL_PIN);
+    bool ur = !gpio_get(UR_PIN);
+    bool dr = !gpio_get(DR_PIN);
+    uint8_t dpad = 0;
+    bool leftCombo  = ul && dl;
+    bool rightCombo = ur && dr;
+    bool upCombo    = ul && ur;
+    bool downCombo  = dl && dr;
+    if(leftCombo)  dpad |= GAMEPAD_MASK_LEFT;
+    if(rightCombo) dpad |= GAMEPAD_MASK_RIGHT;
+    if(upCombo)    dpad |= GAMEPAD_MASK_UP;
+    if(downCombo)  dpad |= GAMEPAD_MASK_DOWN;
+    if (ul && !leftCombo && !upCombo)   dpad |= GAMEPAD_MASK_UP | GAMEPAD_MASK_LEFT;
+    if (dl && !leftCombo && !downCombo) dpad |= GAMEPAD_MASK_DOWN | GAMEPAD_MASK_LEFT;
+    if (ur && !rightCombo && !upCombo)  dpad |= GAMEPAD_MASK_UP | GAMEPAD_MASK_RIGHT;
+    if (dr && !rightCombo && !downCombo)dpad |= GAMEPAD_MASK_DOWN | GAMEPAD_MASK_RIGHT;
+    Gamepad *gamepad = Storage::getInstance().GetGamepad();
+    gamepad->state.dpad = runSOCDCleaner(Storage::getInstance().GetConfig()->socdMode, dpad);
+}
+REGISTER_ADDON(DiagonalDpadCreate, DiagonalDpadInit, nullptr, DiagonalDpadProcess, nullptr);
+EOF
+
+      - name: Register addon
+        run: |
+          echo '#include "DiagonalDpad.h"' >> src/add-ons/addon_list.h
+          echo 'ADDON(DiagonalDpad)' >> src/add-ons/addon_list.h
+
+      - name: CMake configure
+        run: |
+          mkdir build
+          cd build
+          cmake .. -DPICO_BOARD=pico -DGP2040_BOARDCONFIG=DiagonalDpad -DPICO_SDK_FETCH_FROM_GIT=ON
+
+      - name: Compile firmware
+        run: |
+          cd build
+          make -j4
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: DiagonalDpad_Firmware
+          path: build/GP2040-CE.uf2
